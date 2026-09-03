@@ -1,55 +1,45 @@
+import sys
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains import create_retrieval_chain
-from langchain_core.prompts import PromptTemplate
-
+from langchain_core.prompts import ChatPromptTemplate
 from app.components.llm import load_llm
 from app.components.vector_store import load_vector_store
-from app.config.config import HUGGINGFACE_REPO_ID, HF_TOKEN
 from app.common.logger import get_logger
-from app.common.custom_exception import CustomException
 
 logger = get_logger(__name__)
 
-CUSTOM_PROMPT_TEMPLATE = """Answer the following medical question in 2-3 lines maximum using only the information provided in the context.
-
-Context:
-{context}
-
-Question:
-{input}
-
-Answer:
-"""
-
-def set_custom_prompt():
-    return PromptTemplate(
-        template=CUSTOM_PROMPT_TEMPLATE,
-        input_variables=["context", "input"]
-    )
+system_prompt = (
+    "You are an assistant for question-answering tasks. "
+    "Use the following pieces of retrieved context to answer "
+    "the question. If you don't know the answer, say that you "
+    "don't know. Use three sentences maximum and keep the "
+    "answer concise.\n\n"
+    "{context}"
+)
 
 def create_qa_chain():
     try:
-        logger.info("Loading vector store for context")
-        db = load_vector_store()
-
-        if db is None:
-            raise CustomException("Vector store not present or empty")
-
+        print("[DEBUG] Attempting to load LLM...", file=sys.stderr, flush=True)
         llm = load_llm()
-
         if llm is None:
-            raise CustomException("LLM not loaded")
+            raise RuntimeError("load_llm() returned None. Check GROQ_API_KEY.")
 
-        retriever = db.as_retriever(search_kwargs={'k': 1})
-        prompt = set_custom_prompt()
+        print("[DEBUG] Attempting to load Vector Store...", file=sys.stderr, flush=True)
+        vector_store = load_vector_store()
+        if vector_store is None:
+            raise RuntimeError("load_vector_store() returned None. Check FAISS index path and HF_TOKEN.")
 
+        retriever = vector_store.as_retriever(search_kwargs={"k": 3})
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_prompt),
+            ("human", "{input}"),
+        ])
         question_answer_chain = create_stuff_documents_chain(llm, prompt)
         rag_chain = create_retrieval_chain(retriever, question_answer_chain)
-
-        logger.info("Successfully created the QA chain")
+        print("[DEBUG] QA chain built successfully!", file=sys.stderr, flush=True)
         return rag_chain
 
     except Exception as e:
-        error_message = CustomException("Failed to make a QA chain", e)
-        logger.error(str(error_message))
-        return None
+        print(f"[DEBUG ERROR IN RETRIEVER]: {str(e)}", file=sys.stderr, flush=True)
+        # Raise the actual error instead of returning None so application.py catches it
+        raise e
