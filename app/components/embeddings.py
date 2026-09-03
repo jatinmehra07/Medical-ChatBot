@@ -1,54 +1,36 @@
 import os
 import sys
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from typing import List
+import numpy as np
+from huggingface_hub import InferenceClient
 from langchain_core.embeddings import Embeddings
 from app.common.logger import get_logger
 
 logger = get_logger(__name__)
 
 class DirectHuggingFaceEndpointEmbeddings(Embeddings):
-    """Direct HTTP requests to Hugging Face's updated Inference Router API."""
+    """Hugging Face InferenceClient embeddings targeting feature-extraction directly."""
     def __init__(self, token: str, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
-        # Updated active inference router host
-        self.api_url = f"https://router.huggingface.co/hf-inference/models/{model_name}"
-        self.headers = {
-            "Authorization": f"Bearer {token.strip()}",
-            "Content-Type": "application/json"
-        }
-        
-        self.session = requests.Session()
-        retries = Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[502, 503, 504],
-            raise_on_status=False
-        )
-        self.session.mount("https://", HTTPAdapter(max_retries=retries))
+        self.client = InferenceClient(token=token.strip())
+        self.model_name = model_name
 
-    def _call_api(self, text_payload):
-        response = self.session.post(
-            self.api_url,
-            headers=self.headers,
-            json={"inputs": text_payload, "options": {"wait_for_model": True}},
-            timeout=45
-        )
-        if response.status_code != 200:
-            raise RuntimeError(f"Hugging Face API error ({response.status_code}): {response.text}")
-        return response.json()
+    def _extract(self, text: str) -> List[float]:
+        # Explicitly requests feature extraction vectors
+        res = self.client.feature_extraction(text, model=self.model_name)
+        if hasattr(res, "tolist"):
+            res = res.tolist()
+        
+        # Squeeze batch / sequence dimensions if returned as 2D/3D array
+        arr = np.array(res)
+        if arr.ndim > 1:
+            arr = arr.mean(axis=0) if arr.ndim == 2 and arr.shape[0] > 1 else arr.squeeze()
+        return arr.tolist()
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        return self._call_api(texts)
+        return [self._extract(t) for t in texts]
 
     def embed_query(self, text: str) -> List[float]:
-        data = self._call_api(text)
-        
-        # Flatten embedding if wrapped in outer batch dimension
-        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
-            return data[0]
-        return data
+        return self._extract(text)
 
 def get_embedding_model():
     token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
