@@ -6,6 +6,7 @@ from app.common.custom_exception import CustomException
 
 from app.config.config import DATA_PATH,CHUNK_SIZE,CHUNK_OVERLAP
 
+DATA_PATH = os.path.join(os.getcwd(), "data")
 logger = get_logger(__name__)
 
 def load_pdf_files():

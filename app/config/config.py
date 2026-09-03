@@ -1,9 +1,20 @@
 import os
-HF_TOKEN = os.environ.get("HF_TOKEN")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+from dotenv import load_dotenv
 
-HUGGINGFACE_REPO_ID="mistralai/Mistral-7B-Instruct-v0.3"
-DB_FAISS_PATH="vectorstore/db_faiss"
-DATA_PATH="data/"
-CHUNK_SIZE=500
-CHUNK_OVERLAP=50
+load_dotenv()
+
+# Base project directory
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+
+# Directory paths
+DATA_PATH = os.path.join(BASE_DIR, "data")
+DB_FAISS_PATH = os.path.join(BASE_DIR, "vectorstore")
+
+# Text splitter parameters
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 50
+
+# HuggingFace & Model settings
+HUGGINGFACE_REPO_ID = os.getenv("HUGGINGFACE_REPO_ID", "sentence-transformers/all-MiniLM-L6-v2")
+HF_TOKEN = os.getenv("HF_TOKEN")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
