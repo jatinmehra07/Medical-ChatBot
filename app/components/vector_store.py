@@ -1,10 +1,52 @@
 import os
 import sys
+import pickle
+import io
+import faiss
 from langchain_community.vectorstores import FAISS
+from langchain_community.docstore.in_memory import InMemoryDocstore
 from app.components.embeddings import get_embedding_model
 from app.common.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Custom unpickler to ignore missing Pydantic private attributes like '__fields_set__'
+class SafeUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        return super().find_class(module, name)
+
+def safe_load_pickle(file_path):
+    with open(file_path, "rb") as f:
+        data = f.read()
+    
+    # Patch __setstate__ for Pydantic objects during deserialization
+    try:
+        return pickle.loads(data)
+    except (KeyError, AttributeError):
+        print("[DEBUG] Using fallback dict unpickling for Pydantic mismatch...", file=sys.stderr, flush=True)
+        
+        # Monkeypatch Document.__setstate__ temporarily if Pydantic fails
+        from langchain_core.documents import Document
+        orig_setstate = getattr(Document, "__setstate__", None)
+        
+        def lenient_setstate(self, state):
+            if isinstance(state, dict):
+                # Remove internal pydantic fields if present
+                state.pop("__fields_set__", None)
+                state.pop("__pydantic_extra__", None)
+                state.pop("__pydantic_fields_set__", None)
+                if hasattr(self, "__dict__"):
+                    self.__dict__.update(state)
+            elif isinstance(state, tuple) and len(state) == 2:
+                self.__dict__.update(state[1])
+                
+        Document.__setstate__ = lenient_setstate
+        try:
+            res = pickle.loads(data)
+            return res
+        finally:
+            if orig_setstate:
+                Document.__setstate__ = orig_setstate
 
 def get_faiss_directory():
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -39,31 +81,22 @@ def load_vector_store():
 
     print(f"[DEBUG] Loading FAISS index locally from: {index_dir}", file=sys.stderr, flush=True)
 
-    try:
-        vector_store = FAISS.load_local(
-            folder_path=index_dir,
-            embeddings=embedding_model,
-            allow_dangerous_deserialization=True
-        )
-    except KeyError as e:
-        if "__fields_set__" in str(e):
-            print("[DEBUG] Caught Pydantic v1/v2 unpickling mismatch. Re-reading with compatibility fix...", file=sys.stderr, flush=True)
-            # Re-read index directly using FAISS read_index if pickle docstore has schema mismatch
-            import faiss
-            import pickle
-            
-            index = faiss.read_index(os.path.join(index_dir, "index.faiss"))
-            with open(os.path.join(index_dir, "index.pkl"), "rb") as f:
-                docstore, index_to_docstore_id = pickle.load(f)
-            
-            vector_store = FAISS(
-                embedding_function=embedding_model,
-                index=index,
-                docstore=docstore,
-                index_to_docstore_id=index_to_docstore_id
-            )
-        else:
-            raise e
+    faiss_file = os.path.join(index_dir, "index.faiss")
+    pkl_file = os.path.join(index_dir, "index.pkl")
+
+    # Load FAISS index file directly
+    raw_index = faiss.read_index(faiss_file)
+
+    # Safely load the docstore pickle
+    docstore, index_to_docstore_id = safe_load_pickle(pkl_file)
+
+    # Reconstruct the LangChain FAISS instance
+    vector_store = FAISS(
+        embedding_function=embedding_model,
+        index=raw_index,
+        docstore=docstore,
+        index_to_docstore_id=index_to_docstore_id
+    )
 
     print("[DEBUG] Vector store loaded successfully!", file=sys.stderr, flush=True)
     return vector_store
