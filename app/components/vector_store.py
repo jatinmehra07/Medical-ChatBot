@@ -1,52 +1,46 @@
 import os
 import sys
 import pickle
-import io
 import faiss
 from langchain_community.vectorstores import FAISS
-from langchain_community.docstore.in_memory import InMemoryDocstore
+from langchain_core.documents import Document
 from app.components.embeddings import get_embedding_model
 from app.common.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Custom unpickler to ignore missing Pydantic private attributes like '__fields_set__'
-class SafeUnpickler(pickle.Unpickler):
-    def find_class(self, module, name):
-        return super().find_class(module, name)
-
-def safe_load_pickle(file_path):
+def load_clean_docstore(file_path):
     with open(file_path, "rb") as f:
-        data = f.read()
+        raw = pickle.load(f)
     
-    # Patch __setstate__ for Pydantic objects during deserialization
-    try:
-        return pickle.loads(data)
-    except (KeyError, AttributeError):
-        print("[DEBUG] Using fallback dict unpickling for Pydantic mismatch...", file=sys.stderr, flush=True)
-        
-        # Monkeypatch Document.__setstate__ temporarily if Pydantic fails
-        from langchain_core.documents import Document
-        orig_setstate = getattr(Document, "__setstate__", None)
-        
-        def lenient_setstate(self, state):
-            if isinstance(state, dict):
-                # Remove internal pydantic fields if present
-                state.pop("__fields_set__", None)
-                state.pop("__pydantic_extra__", None)
-                state.pop("__pydantic_fields_set__", None)
-                if hasattr(self, "__dict__"):
-                    self.__dict__.update(state)
-            elif isinstance(state, tuple) and len(state) == 2:
-                self.__dict__.update(state[1])
-                
-        Document.__setstate__ = lenient_setstate
-        try:
-            res = pickle.loads(data)
-            return res
-        finally:
-            if orig_setstate:
-                Document.__setstate__ = orig_setstate
+    docstore, index_to_docstore_id = raw
+
+    # Ensure all items inside docstore._dict are fully formed Document objects with page_content
+    cleaned_dict = {}
+    underlying_dict = getattr(docstore, "_dict", docstore)
+
+    for doc_id, doc in underlying_dict.items():
+        if isinstance(doc, Document):
+            # If page_content was lost during pickle state mismatch, recover it from instance attributes
+            content = getattr(doc, "page_content", None) or getattr(doc, "__dict__", {}).get("page_content", "")
+            meta = getattr(doc, "metadata", None) or getattr(doc, "__dict__", {}).get("metadata", {})
+            cleaned_dict[doc_id] = Document(page_content=str(content), metadata=dict(meta) if meta else {})
+        elif isinstance(doc, dict):
+            cleaned_dict[doc_id] = Document(
+                page_content=str(doc.get("page_content", "")),
+                metadata=doc.get("metadata", {})
+            )
+        else:
+            # Fallback for raw text strings or tuple objects
+            content = getattr(doc, "page_content", str(doc))
+            cleaned_dict[doc_id] = Document(page_content=str(content))
+
+    if hasattr(docstore, "_dict"):
+        docstore._dict = cleaned_dict
+        return docstore, index_to_docstore_id
+    else:
+        from langchain_community.docstore.in_memory import InMemoryDocstore
+        return InMemoryDocstore(cleaned_dict), index_to_docstore_id
 
 def get_faiss_directory():
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -87,8 +81,8 @@ def load_vector_store():
     # Load FAISS index file directly
     raw_index = faiss.read_index(faiss_file)
 
-    # Safely load the docstore pickle
-    docstore, index_to_docstore_id = safe_load_pickle(pkl_file)
+    # Safely load and convert docstore items into genuine Document objects
+    docstore, index_to_docstore_id = load_clean_docstore(pkl_file)
 
     # Reconstruct the LangChain FAISS instance
     vector_store = FAISS(
@@ -98,5 +92,5 @@ def load_vector_store():
         index_to_docstore_id=index_to_docstore_id
     )
 
-    print("[DEBUG] Vector store loaded successfully!", file=sys.stderr, flush=True)
+    print("[DEBUG] Vector store loaded successfully with clean Document objects!", file=sys.stderr, flush=True)
     return vector_store
