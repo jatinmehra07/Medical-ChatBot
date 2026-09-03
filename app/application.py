@@ -1,8 +1,7 @@
-from flask import Flask, render_template, request, session, redirect, url_for
-from app.components.retriever import create_qa_chain
-from markupsafe import Markup
-from dotenv import load_dotenv
 import os
+from dotenv import load_dotenv
+from flask import Flask, render_template, request, session, redirect, url_for
+from markupsafe import Markup
 
 load_dotenv()
 HF_TOKEN = os.environ.get("HF_TOKEN")
@@ -16,12 +15,18 @@ def nl2br(value):
 
 app.jinja_env.filters['nl2br'] = nl2br
 
-# Initialize QA chain once at startup
-qa_chain = create_qa_chain()
+qa_chain = None
+
+def get_qa_chain():
+    global qa_chain
+    if qa_chain is None:
+        # Import only when the first question is sent, preventing boot-time memory spikes
+        from app.components.retriever import create_qa_chain
+        qa_chain = create_qa_chain()
+    return qa_chain
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    global qa_chain
     if "messages" not in session:
         session["messages"] = []
 
@@ -34,15 +39,11 @@ def index():
             session["messages"] = messages
 
             try:
-                if qa_chain is None:
-                    # Retry loading in case it was initialized before vectorstore existed
-                    qa_chain = create_qa_chain()
-                
-                if qa_chain is None:
+                chain = get_qa_chain()
+                if chain is None:
                     raise Exception("QA chain could not be created (LLM or VectorStore issue)")
 
-                # Modern LangChain input/output key mapping
-                response = qa_chain.invoke({"input": user_input})
+                response = chain.invoke({"input": user_input})
                 result = response.get("answer", "No response")
 
                 messages.append({"role": "assistant", "content": result})
@@ -62,4 +63,5 @@ def clear():
     return redirect(url_for("index"))
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
