@@ -1,46 +1,58 @@
 import os
 import sys
 import pickle
+import io
 import faiss
 from langchain_community.vectorstores import FAISS
+from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain_core.documents import Document
 from app.components.embeddings import get_embedding_model
 from app.common.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Custom unpickler class to intercept Document objects before Pydantic fails
+class LenientDocument:
+    def __init__(self, *args, **kwargs):
+        self.page_content = ""
+        self.metadata = {}
+
+    def __setstate__(self, state):
+        if isinstance(state, dict):
+            self.page_content = state.get("page_content", "")
+            self.metadata = state.get("metadata", {})
+            # Read __dict__ if nested
+            if not self.page_content and "__dict__" in state:
+                self.page_content = state["__dict__"].get("page_content", "")
+                self.metadata = state["__dict__"].get("metadata", {})
+        elif isinstance(state, tuple) and len(state) == 2 and isinstance(state[1], dict):
+            self.page_content = state[1].get("page_content", "")
+            self.metadata = state[1].get("metadata", {})
+
+class SafeDocstoreUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        # Intercept any Document class and substitute with LenientDocument
+        if name == "Document" and ("langchain" in module or "schema" in module or "pydantic" in module):
+            return LenientDocument
+        return super().find_class(module, name)
+
 def load_clean_docstore(file_path):
     with open(file_path, "rb") as f:
-        raw = pickle.load(f)
-    
+        unpickler = SafeDocstoreUnpickler(f)
+        raw = unpickler.load()
+
     docstore, index_to_docstore_id = raw
 
-    # Ensure all items inside docstore._dict are fully formed Document objects with page_content
     cleaned_dict = {}
     underlying_dict = getattr(docstore, "_dict", docstore)
 
     for doc_id, doc in underlying_dict.items():
-        if isinstance(doc, Document):
-            # If page_content was lost during pickle state mismatch, recover it from instance attributes
-            content = getattr(doc, "page_content", None) or getattr(doc, "__dict__", {}).get("page_content", "")
-            meta = getattr(doc, "metadata", None) or getattr(doc, "__dict__", {}).get("metadata", {})
-            cleaned_dict[doc_id] = Document(page_content=str(content), metadata=dict(meta) if meta else {})
-        elif isinstance(doc, dict):
-            cleaned_dict[doc_id] = Document(
-                page_content=str(doc.get("page_content", "")),
-                metadata=doc.get("metadata", {})
-            )
-        else:
-            # Fallback for raw text strings or tuple objects
-            content = getattr(doc, "page_content", str(doc))
-            cleaned_dict[doc_id] = Document(page_content=str(content))
+        content = getattr(doc, "page_content", "")
+        meta = getattr(doc, "metadata", {})
+        cleaned_dict[doc_id] = Document(page_content=str(content), metadata=dict(meta) if meta else {})
 
-    if hasattr(docstore, "_dict"):
-        docstore._dict = cleaned_dict
-        return docstore, index_to_docstore_id
-    else:
-        from langchain_community.docstore.in_memory import InMemoryDocstore
-        return InMemoryDocstore(cleaned_dict), index_to_docstore_id
+    new_docstore = InMemoryDocstore(cleaned_dict)
+    return new_docstore, index_to_docstore_id
 
 def get_faiss_directory():
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -81,7 +93,7 @@ def load_vector_store():
     # Load FAISS index file directly
     raw_index = faiss.read_index(faiss_file)
 
-    # Safely load and convert docstore items into genuine Document objects
+    # Safely load docstore using custom unpickler
     docstore, index_to_docstore_id = load_clean_docstore(pkl_file)
 
     # Reconstruct the LangChain FAISS instance
