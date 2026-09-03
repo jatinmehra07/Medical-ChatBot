@@ -7,10 +7,7 @@ from app.common.logger import get_logger
 logger = get_logger(__name__)
 
 def get_faiss_directory():
-    # 1. Project root relative to this file
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    
-    # Check multiple candidate directories where index.faiss might live
     candidate_paths = [
         os.path.join(base_dir, "vectorstore"),
         os.path.join(base_dir, "vectorstore", "db_faiss"),
@@ -22,16 +19,11 @@ def get_faiss_directory():
 
     for p in candidate_paths:
         target_file = os.path.join(p, "index.faiss")
-        exists = os.path.exists(target_file)
-        print(f"[DEBUG PATH CHECK] Checking '{target_file}' -> Exists: {exists}", file=sys.stderr, flush=True)
-        if exists:
+        if os.path.exists(target_file):
             return os.path.abspath(p)
 
-    # If not found, walk the project tree to locate any .faiss file on Render
-    print("[DEBUG PATH CHECK] Searching all files for .faiss...", file=sys.stderr, flush=True)
     for root, _, files in os.walk(base_dir):
         if "index.faiss" in files:
-            print(f"[DEBUG PATH CHECK] Found index.faiss in: {root}", file=sys.stderr, flush=True)
             return root
 
     return None
@@ -43,18 +35,35 @@ def load_vector_store():
 
     index_dir = get_faiss_directory()
     if not index_dir:
-        raise FileNotFoundError(
-            "index.faiss was NOT found anywhere in the repository on Render. "
-            "Make sure 'vectorstore/index.faiss' and 'vectorstore/index.pkl' are committed to Git."
-        )
+        raise FileNotFoundError("index.faiss was not found in the project directory.")
 
     print(f"[DEBUG] Loading FAISS index locally from: {index_dir}", file=sys.stderr, flush=True)
-    
-    # Load the index with dangerous deserialization permitted for local pkl files
-    vector_store = FAISS.load_local(
-        folder_path=index_dir,
-        embeddings=embedding_model,
-        allow_dangerous_deserialization=True
-    )
+
+    try:
+        vector_store = FAISS.load_local(
+            folder_path=index_dir,
+            embeddings=embedding_model,
+            allow_dangerous_deserialization=True
+        )
+    except KeyError as e:
+        if "__fields_set__" in str(e):
+            print("[DEBUG] Caught Pydantic v1/v2 unpickling mismatch. Re-reading with compatibility fix...", file=sys.stderr, flush=True)
+            # Re-read index directly using FAISS read_index if pickle docstore has schema mismatch
+            import faiss
+            import pickle
+            
+            index = faiss.read_index(os.path.join(index_dir, "index.faiss"))
+            with open(os.path.join(index_dir, "index.pkl"), "rb") as f:
+                docstore, index_to_docstore_id = pickle.load(f)
+            
+            vector_store = FAISS(
+                embedding_function=embedding_model,
+                index=index,
+                docstore=docstore,
+                index_to_docstore_id=index_to_docstore_id
+            )
+        else:
+            raise e
+
     print("[DEBUG] Vector store loaded successfully!", file=sys.stderr, flush=True)
     return vector_store
