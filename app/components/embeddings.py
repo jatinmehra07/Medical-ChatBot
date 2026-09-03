@@ -10,13 +10,15 @@ from app.common.logger import get_logger
 logger = get_logger(__name__)
 
 class DirectHuggingFaceEndpointEmbeddings(Embeddings):
-    """Direct HTTP requests to Hugging Face Inference API with network retry logic."""
+    """Direct HTTP requests to Hugging Face's updated Inference Router API."""
     def __init__(self, token: str, model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
-        # Primary standard inference API URL
-        self.api_url = f"https://api-inference.huggingface.co/models/{model_name}"
-        self.headers = {"Authorization": f"Bearer {token.strip()}"}
+        # Updated active inference router host
+        self.api_url = f"https://router.huggingface.co/hf-inference/models/{model_name}"
+        self.headers = {
+            "Authorization": f"Bearer {token.strip()}",
+            "Content-Type": "application/json"
+        }
         
-        # Configure robust session with automatic DNS/connection retries
         self.session = requests.Session()
         retries = Retry(
             total=3,
